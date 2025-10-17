@@ -13,39 +13,28 @@ contract EthsHub is Initializable, AccessControlUpgradeable, ReentrancyGuard {
 
     // Event definitions - Record key information only
     event RefUpdated(
-        bytes32 indexed refKey,
-        bytes refName,
-        bytes20 oldOid,
-        bytes20 newOid,
-        uint256 packfileSize,
-        uint256 timestamp
+        bytes32 indexed refKey, bytes refName, bytes20 oldOid, bytes20 newOid, uint256 packfileSize, uint256 timestamp
     );
 
-    event ForceRefUpdated(
-        bytes32 indexed refKey,
-        bytes refName,
-        bytes20 oldOid,
-        bytes20 newOid,
-        uint256 timestamp
-    );
+    event ForceRefUpdated(bytes32 indexed refKey, bytes refName, bytes20 oldOid, bytes20 newOid, uint256 timestamp);
 
     event DefaultBranchChanged(bytes oldBranch, bytes newBranch);
 
     // Lightweight Commit Information - Minimal data storage
     struct PushRecord {
-        bytes20 newOid;       // Final commit oid of the current push
-        bytes20 parentOid;    // Parent commit oid, used to build history chain
-        bytes20 packfileKey;  // Key for storing the packfile
-        uint256 size;         // Packfile size
-        uint256 timestamp;    // Timestamp
-        address pusher;       // Pusher address
+        bytes20 newOid; // Final commit oid of the current push
+        bytes20 parentOid; // Parent commit oid, used to build history chain
+        bytes20 packfileKey; // Key for storing the packfile
+        uint256 size; // Packfile size
+        uint256 timestamp; // Timestamp
+        address pusher; // Pusher address
     }
 
     // Branch metadata - Minimal storage
     struct Branch {
-        bytes20 headOid;      // Latest commit oid
-        uint256 recordCount;  // Number of commit records (for pagination)
-        bool exists;          // Whether the branch exists
+        bytes20 headOid; // Latest commit oid
+        uint256 recordCount; // Number of commit records (for pagination)
+        bool exists; // Whether the branch exists
     }
 
     struct RefData {
@@ -56,30 +45,26 @@ contract EthsHub is Initializable, AccessControlUpgradeable, ReentrancyGuard {
     // Repository metadata
     bytes public repoName;
     bytes public defaultBranchName;
-    address public db;       // Address of the database storing packfiles
+    address public db; // Address of the database storing packfiles
 
     // Core storage - Minimal design
-    mapping(bytes32 => Branch) private _branches;          // refKey => Branch information
-    mapping(bytes32 => mapping(uint256 => PushRecord)) private _branchRecords;  // refKey => index => Commit record
-    bytes[] private _branchNames;                           // All branch names (for enumeration)
+    mapping(bytes32 => Branch) private _branches; // refKey => Branch information
+    mapping(bytes32 => mapping(uint256 => PushRecord)) private _branchRecords; // refKey => index => Commit record
+    bytes[] private _branchNames; // All branch names (for enumeration)
 
     // Initialization function
-    function initialize(
-        address _owner,
-        bytes memory _repoName,
-        IFlatDirectoryFactory _dbFactory
-    ) external initializer {
+    function initialize(address _owner, bytes memory _repoName, IFlatDirectoryFactory _dbFactory) external initializer {
         __AccessControl_init();
 
         require(_owner != address(0), "EthsHub: Invalid owner");
         require(_repoName.length > 0 && _repoName.length <= 100, "EthsHub: Invalid repo name length");
-        for (uint i; i < _repoName.length; i++) {
+        for (uint256 i; i < _repoName.length; i++) {
             bytes1 char = _repoName[i];
             require(
-                (char >= 0x61 && char <= 0x7A) || // a-z
-                (char >= 0x41 && char <= 0x5A) || // A-Z
-                (char >= 0x30 && char <= 0x39) || // 0-9
-                (char == 0x2D || char == 0x2E || char == 0x5F), // -._
+                (char >= 0x61 && char <= 0x7A) // a-z
+                    || (char >= 0x41 && char <= 0x5A) // A-Z
+                    || (char >= 0x30 && char <= 0x39) // 0-9
+                    || (char == 0x2D || char == 0x2E || char == 0x5F), // -._
                 "EthsHub: Repo name must be alphanumeric or -._"
             );
         }
@@ -100,9 +85,8 @@ contract EthsHub is Initializable, AccessControlUpgradeable, ReentrancyGuard {
 
     function _onlyPusher() internal view {
         require(
-            hasRole(PUSHER_ROLE, msg.sender) ||
-            hasRole(MAINTAINER_ROLE, msg.sender) ||
-            hasRole(DEFAULT_ADMIN_ROLE, msg.sender),
+            hasRole(PUSHER_ROLE, msg.sender) || hasRole(MAINTAINER_ROLE, msg.sender)
+                || hasRole(DEFAULT_ADMIN_ROLE, msg.sender),
             "EthsHub: No push permission"
         );
     }
@@ -113,99 +97,10 @@ contract EthsHub is Initializable, AccessControlUpgradeable, ReentrancyGuard {
     }
 
     function _onlyMaintainer() internal view {
-        require(hasRole(MAINTAINER_ROLE, msg.sender) || hasRole(DEFAULT_ADMIN_ROLE, msg.sender), "EthsHub: No maintainer permission");
-    }
-
-    // Core function: Normal push (fast-forward)
-    function push(
-        bytes calldata refName,
-        bytes20 parentOid,
-        bytes20 newOid,
-        bytes20 packfileKey,
-        uint256 packfileSize
-    ) external onlyPusher nonReentrant {
-        // Replacement 1/6
-        bytes32 refKey = _keccak256(refName);
-        Branch storage branch = _branches[refKey];
-
-        // First push to this branch
-        if (!branch.exists) {
-            require(parentOid == bytes20(0), "EthsHub: First push must have no parent");
-            branch.exists = true;
-            branch.headOid = newOid;
-            _branchNames.push(refName);
-
-            // If default branch is not set, set it to the current branch
-            if (defaultBranchName.length == 0) {
-                defaultBranchName = refName;
-            }
-        }
-        // Subsequent push (must be fast-forward)
-        else {
-            require(branch.headOid == parentOid, "EthsHub: Non fast-forward push not allowed");
-            branch.headOid = newOid;
-        }
-
-        // Record push information (store minimal necessary data)
-        uint256 recordIndex = branch.recordCount;
-        _branchRecords[refKey][recordIndex] = PushRecord({
-        newOid: newOid,
-        parentOid: parentOid,
-        packfileKey: packfileKey,
-        size: packfileSize,
-        timestamp: block.timestamp,
-        pusher: msg.sender
-        });
-
-        branch.recordCount++;
-
-        emit RefUpdated(refKey, refName, parentOid, newOid, packfileSize, block.timestamp);
-    }
-
-    // Force push (Maintainer only)
-    function forcePush(
-        bytes calldata refName,
-        bytes20 newOid,
-        bytes20 packfileKey,
-        uint256 packfileSize,
-        bytes20 parentOid  // Parent node of the new commit (may not be in the current branch history)
-    ) external onlyMaintainer nonReentrant {
-        // Replacement 2/6
-        bytes32 refKey = _keccak256(refName);
-        Branch storage branch = _branches[refKey];
-
-        require(branch.exists, "EthsHub: Branch does not exist");
-        bytes20 oldOid = branch.headOid;
-
-        // Update branch head
-        branch.headOid = newOid;
-
-        // Record force push (marked as a special record)
-        uint256 recordIndex = branch.recordCount;
-        _branchRecords[refKey][recordIndex] = PushRecord({
-        newOid: newOid,
-        parentOid: parentOid,  // Stored as the parent of the new commit, not the original branch head
-        packfileKey: packfileKey,
-        size: packfileSize,
-        timestamp: block.timestamp,
-        pusher: msg.sender
-        });
-
-        branch.recordCount++;
-
-        emit ForceRefUpdated(refKey, refName, oldOid, newOid, block.timestamp);
-    }
-
-    // Set default branch
-    function setDefaultBranch(bytes calldata branchName) external onlyMaintainer {
-        // Replacement 3/6
-        bytes32 key = _keccak256(branchName);
-        require(_branches[key].exists, "EthsHub: Branch not exists");
-
-        bytes memory oldBranch = defaultBranchName;
-        defaultBranchName = branchName;
-
-        emit DefaultBranchChanged(oldBranch, branchName);
+        require(
+            hasRole(MAINTAINER_ROLE, msg.sender) || hasRole(DEFAULT_ADMIN_ROLE, msg.sender),
+            "EthsHub: No maintainer permission"
+        );
     }
 
     // Permission management: Add pusher
@@ -224,6 +119,95 @@ contract EthsHub is Initializable, AccessControlUpgradeable, ReentrancyGuard {
     }
 
     // ---------------------- Query ----------------------
+    // Core function: Normal push (fast-forward)
+    function push(bytes calldata refName, bytes20 parentOid, bytes20 newOid, bytes20 packfileKey, uint256 packfileSize)
+        external
+        onlyPusher
+        nonReentrant
+    {
+        bytes32 refKey = _keccak256(refName);
+        Branch storage branch = _branches[refKey];
+
+        // First push to this branch
+        if (!branch.exists) {
+            require(parentOid == bytes20(0), "EthsHub: First push must have no parent");
+            branch.headOid = newOid;
+            branch.exists = true;
+            _branchNames.push(refName);
+
+            // If default branch is not set, set it to the current branch
+            if (defaultBranchName.length == 0) {
+                defaultBranchName = refName;
+            }
+        }
+        // Subsequent push (must be fast-forward)
+        else {
+            require(branch.headOid == parentOid, "EthsHub: Non fast-forward push not allowed");
+            branch.headOid = newOid;
+        }
+
+        // Record push information (store minimal necessary data)
+        uint256 recordIndex = branch.recordCount;
+        _branchRecords[refKey][recordIndex] = PushRecord({
+            newOid: newOid,
+            parentOid: parentOid,
+            packfileKey: packfileKey,
+            size: packfileSize,
+            timestamp: block.timestamp,
+            pusher: msg.sender
+        });
+
+        branch.recordCount++;
+
+        emit RefUpdated(refKey, refName, parentOid, newOid, packfileSize, block.timestamp);
+    }
+
+    // TODO
+    // Force push (Maintainer only)
+    function forcePush(
+        bytes calldata refName,
+        bytes20 newOid,
+        bytes20 packfileKey,
+        uint256 packfileSize,
+        bytes20 parentOid // Parent node of the new commit (may not be in the current branch history)
+    ) external onlyMaintainer nonReentrant {
+        bytes32 refKey = _keccak256(refName);
+        Branch storage branch = _branches[refKey];
+
+        require(branch.exists, "EthsHub: Branch does not exist");
+
+        bytes20 oldOid = branch.headOid;
+        // Update branch head
+        branch.headOid = newOid;
+
+        // Record force push (marked as a special record)
+        uint256 recordIndex = branch.recordCount;
+        _branchRecords[refKey][recordIndex] = PushRecord({
+            newOid: newOid,
+            parentOid: parentOid, // Stored as the parent of the new commit, not the original branch head
+            packfileKey: packfileKey,
+            size: packfileSize,
+            timestamp: block.timestamp,
+            pusher: msg.sender
+        });
+
+        branch.recordCount++;
+
+        emit ForceRefUpdated(refKey, refName, oldOid, newOid, block.timestamp);
+    }
+
+    // Set default branch
+    function setDefaultBranch(bytes calldata branchName) external onlyMaintainer {
+        bytes32 key = _keccak256(branchName);
+        require(_branches[key].exists, "EthsHub: Branch not exists");
+
+        bytes memory oldBranch = defaultBranchName;
+        defaultBranchName = branchName;
+
+        emit DefaultBranchChanged(oldBranch, branchName);
+    }
+
+    // ---------------------- Query ----------------------
     // Query function: Get branch list (paginated)
     function listBranches(uint256 start, uint256 limit) external view returns (RefData[] memory list) {
         uint256 end = start + limit;
@@ -235,12 +219,8 @@ contract EthsHub is Initializable, AccessControlUpgradeable, ReentrancyGuard {
         list = new RefData[](count);
         for (uint256 i = 0; i < count; i++) {
             bytes memory branchName = _branchNames[start + i];
-            // Replacement 4/6
             bytes32 key = _keccak256(branchName);
-            list[i] = RefData({
-            name: branchName,
-            hash: _branches[key].headOid
-            });
+            list[i] = RefData({name: branchName, hash: _branches[key].headOid});
         }
     }
 
@@ -251,24 +231,22 @@ contract EthsHub is Initializable, AccessControlUpgradeable, ReentrancyGuard {
 
     // Query function: Get default branch
     function getDefaultBranch() external view returns (bytes memory name, bytes20 headOid) {
-        // Replacement 5/6
         return (defaultBranchName, _branches[_keccak256(defaultBranchName)].headOid);
     }
 
     // Query function: Get branch head info
     function getBranchHead(bytes calldata refName) external view returns (bytes20 headOid, bool exists) {
-        // Replacement 6/6
         bytes32 refKey = _keccak256(refName);
         Branch storage branch = _branches[refKey];
         return (branch.headOid, branch.exists);
     }
 
     // Query function: Get push records (for efficient history fetching)
-    function getPushRecords(
-        bytes calldata refName,
-        uint256 startIndex,
-        uint256 count
-    ) external view returns (PushRecord[] memory) {
+    function getPushRecords(bytes calldata refName, uint256 startIndex, uint256 count)
+        external
+        view
+        returns (PushRecord[] memory)
+    {
         bytes32 refKey = _keccak256(refName); // Note: Already optimized by the helper function
         Branch storage branch = _branches[refKey];
         require(branch.exists, "EthsHub: Branch not exists");
@@ -278,15 +256,15 @@ contract EthsHub is Initializable, AccessControlUpgradeable, ReentrancyGuard {
             endIndex = branch.recordCount;
         }
 
-        uint256 resultCount = endIndex - startIndex;
+        uint256 resultCount = endIndex > startIndex ? endIndex - startIndex : 0;
         PushRecord[] memory results = new PushRecord[](resultCount);
-
         for (uint256 i = 0; i < resultCount; i++) {
             results[i] = _branchRecords[refKey][startIndex + i];
         }
-
         return results;
     }
+
+    // ---------------------- Database fallback ----------------------
 
     // Database interaction proxy (forward necessary calls only)
     fallback(bytes calldata data) external payable returns (bytes memory) {
@@ -297,14 +275,13 @@ contract EthsHub is Initializable, AccessControlUpgradeable, ReentrancyGuard {
 
         // write check
         if (
-            selector == 0xc1d71b17 || // writeChunksByBlobs
-            selector == 0x6c0a0207 || // remove
-            selector == 0x4d705e59    // truncate
+            selector == 0xc1d71b17 // writeChunksByBlobs
+                || selector == 0x6c0a0207 // remove
+                || selector == 0x4d705e59 // truncate
         ) {
             require(
-                hasRole(PUSHER_ROLE, msg.sender) ||
-                hasRole(MAINTAINER_ROLE, msg.sender) ||
-                hasRole(DEFAULT_ADMIN_ROLE, msg.sender),
+                hasRole(PUSHER_ROLE, msg.sender) || hasRole(MAINTAINER_ROLE, msg.sender)
+                    || hasRole(DEFAULT_ADMIN_ROLE, msg.sender),
                 "EthsHub: No write permission"
             );
         }
@@ -332,8 +309,8 @@ contract EthsHub is Initializable, AccessControlUpgradeable, ReentrancyGuard {
         // The KECCAK256 opcode is used directly via assembly, which is more
         // gas-efficient than the Solidity builtin function for dynamic data.
         assembly {
-        // data is at p; data length is mload(data)
-        // Actual content starts 32 bytes after the pointer (skipping the length)
+            // data is at p; data length is mload(data)
+            // Actual content starts 32 bytes after the pointer (skipping the length)
             result := keccak256(add(data, 32), mload(data))
         }
     }

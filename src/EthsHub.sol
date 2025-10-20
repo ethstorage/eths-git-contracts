@@ -376,12 +376,12 @@ contract EthsHub is Initializable, AccessControlUpgradeable, ReentrancyGuard {
         // Write check: Restrict access to DB write functions to authorized roles
         if (
             selector == 0xc1d71b17 // writeChunksByBlobs
-            || selector == 0x6c0a0207 // remove
-            || selector == 0x4d705e59 // truncate
+                || selector == 0x6c0a0207 // remove
+                || selector == 0x4d705e59 // truncate
         ) {
             require(
                 hasRole(PUSHER_ROLE, msg.sender) || hasRole(MAINTAINER_ROLE, msg.sender)
-                || hasRole(DEFAULT_ADMIN_ROLE, msg.sender),
+                    || hasRole(DEFAULT_ADMIN_ROLE, msg.sender),
                 "EthsHub: No write permission"
             );
         }

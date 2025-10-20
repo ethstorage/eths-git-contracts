@@ -198,6 +198,9 @@ contract EthsHub is Initializable, AccessControlUpgradeable, ReentrancyGuard {
 
         // ====== Scenario 1: Delete Branch (newOid=0, Logical clear) ======
         if (newOid == bytes20(0)) {
+            bytes32 defaultRefKey = _keccak256(defaultBranchName);
+            require(refKey != defaultRefKey, "EthsHub: Cannot delete default branch");
+
             // 1. Remove branch name from _branchNames (avoid counting invalid branches)
             uint256 branchIdx = _branchNameIndex[refKey];
             require(branchIdx < _branchNames.length, "EthsHub: Branch not in name list");

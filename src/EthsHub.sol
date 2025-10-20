@@ -15,9 +15,8 @@ contract EthsHub is Initializable, AccessControlUpgradeable, ReentrancyGuard {
     event RefUpdated(
         bytes32 indexed refKey, bytes refName, bytes20 oldOid, bytes20 newOid, uint256 packfileSize, uint256 timestamp
     );
-
     event ForceRefUpdated(bytes32 indexed refKey, bytes refName, bytes20 oldOid, bytes20 newOid, uint256 timestamp);
-
+    event BranchDeleted(bytes refName, uint256 timestamp);
     event DefaultBranchChanged(bytes oldBranch, bytes newBranch);
 
     // Lightweight Commit Information - Minimal data storage
@@ -30,27 +29,33 @@ contract EthsHub is Initializable, AccessControlUpgradeable, ReentrancyGuard {
         address pusher; // Pusher address
     }
 
-    // Branch metadata - Minimal storage
+    // Branch Metadata (Core: activeLength maintains the logical number of valid records)
     struct Branch {
-        bytes20 headOid; // Latest commit oid
-        uint256 recordCount; // Number of commit records (for pagination)
+        bytes20 headOid; // Latest commit oid of the branch
+        uint256 activeLength; // Logical count of valid records (core field, replaces array length)
         bool exists; // Whether the branch exists
     }
 
+    // Branch list query return structure
     struct RefData {
-        bytes name;
-        bytes32 hash;
+        bytes name; // Branch name
+        bytes20 hash; // Latest commit oid of the branch
     }
 
+    // ======================== Core Storage ========================
     // Repository metadata
     bytes public repoName;
     bytes public defaultBranchName;
     address public db; // Address of the database storing packfiles
 
-    // Core storage - Minimal design
+    // Branch mapping: refKey (hash of branch name) → Branch info
     mapping(bytes32 => Branch) private _branches; // refKey => Branch information
-    mapping(bytes32 => mapping(uint256 => PushRecord)) private _branchRecords; // refKey => index => Commit record
+    // Push Record mapping: refKey → Physical Array (data is never deleted, filtered by activeLength)
+    mapping(bytes32 => PushRecord[]) private _branchRecords;
+
     bytes[] private _branchNames; // All branch names (for enumeration)
+    // Branch Name Index mapping: Quick lookup of branch name's position in _branchNames (used for deletion)
+    mapping(bytes32 => uint256) private _branchNameIndex;
 
     // Initialization function
     function initialize(address _owner, bytes memory _repoName, IFlatDirectoryFactory _dbFactory) external initializer {
@@ -77,7 +82,7 @@ contract EthsHub is Initializable, AccessControlUpgradeable, ReentrancyGuard {
         db = _dbFactory.create();
     }
 
-    // Permission check modifiers (unwrapped for Gas optimization)
+    // ======================== Permission check modifiers ========================
     modifier onlyPusher() {
         _onlyPusher();
         _;
@@ -103,23 +108,24 @@ contract EthsHub is Initializable, AccessControlUpgradeable, ReentrancyGuard {
         );
     }
 
-    // Permission management: Add pusher
+    // ======================== Permission management ========================
     function addPusher(address account) external onlyMaintainer {
         grantRole(PUSHER_ROLE, account);
     }
 
-    // Permission management: Remove pusher
     function removePusher(address account) external onlyMaintainer {
         revokeRole(PUSHER_ROLE, account);
     }
 
-    // Permission management: Add maintainer
     function addMaintainer(address account) external onlyRole(DEFAULT_ADMIN_ROLE) {
         grantRole(MAINTAINER_ROLE, account);
     }
 
-    // ---------------------- Query ----------------------
-    // Core function: Normal push (fast-forward)
+    // ======================== Core Business Functions ========================
+    /**
+     * @dev Normal push (fast-forward)
+     * Core: Uses indexed assignment instead of push, marks valid records via activeLength.
+     */
     function push(bytes calldata refName, bytes20 parentOid, bytes20 newOid, bytes20 packfileKey, uint256 packfileSize)
         external
         onlyPusher
@@ -127,12 +133,17 @@ contract EthsHub is Initializable, AccessControlUpgradeable, ReentrancyGuard {
     {
         bytes32 refKey = _keccak256(refName);
         Branch storage branch = _branches[refKey];
+        PushRecord[] storage records = _branchRecords[refKey]; // Reference to the physical array
 
-        // First push to this branch
+        // 1. First push to this branch
         if (!branch.exists) {
             require(parentOid == bytes20(0), "EthsHub: First push must have no parent");
             branch.headOid = newOid;
             branch.exists = true;
+            branch.activeLength = 0; // Initial active length is 0 (no valid records yet)
+
+            // Record branch name and index
+            _branchNameIndex[refKey] = _branchNames.length;
             _branchNames.push(refName);
 
             // If default branch is not set, set it to the current branch
@@ -140,15 +151,14 @@ contract EthsHub is Initializable, AccessControlUpgradeable, ReentrancyGuard {
                 defaultBranchName = refName;
             }
         }
-        // Subsequent push (must be fast-forward)
+        // 2. Subsequent push (must be fast-forward: Parent OID must match current branch head)
         else {
             require(branch.headOid == parentOid, "EthsHub: Non fast-forward push not allowed");
             branch.headOid = newOid;
         }
 
-        // Record push information (store minimal necessary data)
-        uint256 recordIndex = branch.recordCount;
-        _branchRecords[refKey][recordIndex] = PushRecord({
+        // 3. Core: Use indexed assignment instead of push, do not modify physical array length explicitly
+        PushRecord memory newRecord = PushRecord({
             newOid: newOid,
             parentOid: parentOid,
             packfileKey: packfileKey,
@@ -157,49 +167,118 @@ contract EthsHub is Initializable, AccessControlUpgradeable, ReentrancyGuard {
             pusher: msg.sender
         });
 
-        branch.recordCount++;
+        // Assign to the index corresponding to the "current active length" (physical array auto-expands if needed)
+        records[branch.activeLength] = newRecord;
+        // Increment logical active length (marks this record as valid)
+        branch.activeLength++;
 
+        // Emit event
         emit RefUpdated(refKey, refName, parentOid, newOid, packfileSize, block.timestamp);
     }
 
-    // TODO
-    // Force push (Maintainer only)
+    /**
+     * @dev Force push (supports three scenarios)
+     * 1. Delete Branch: newOid=0 → activeLength=0 + marks exists=false
+     * 2. Full History Replacement: parentOid=0 → activeLength reset to 0, then add 1 new record
+     * 3. Partial History Replacement: parentOid≠0 → activeLength truncated to parentIndex+1, then add 1 new record
+     */
     function forcePush(
         bytes calldata refName,
         bytes20 newOid,
         bytes20 packfileKey,
         uint256 packfileSize,
-        bytes20 parentOid // Parent node of the new commit (may not be in the current branch history)
+        bytes20 parentOid,
+        uint256 parentIndex
     ) external onlyMaintainer nonReentrant {
         bytes32 refKey = _keccak256(refName);
         Branch storage branch = _branches[refKey];
-
+        PushRecord[] storage records = _branchRecords[refKey];
         require(branch.exists, "EthsHub: Branch does not exist");
 
-        bytes20 oldOid = branch.headOid;
-        // Update branch head
-        branch.headOid = newOid;
+        bytes20 oldOid = branch.headOid; // Record old head for event traceability
 
-        // Record force push (marked as a special record)
-        uint256 recordIndex = branch.recordCount;
-        _branchRecords[refKey][recordIndex] = PushRecord({
+        // ====== Scenario 1: Delete Branch (newOid=0, Logical clear) ======
+        if (newOid == bytes20(0)) {
+            // 1. Remove branch name from _branchNames (avoid counting invalid branches)
+            uint256 branchIdx = _branchNameIndex[refKey];
+            require(branchIdx < _branchNames.length, "EthsHub: Branch not in name list");
+
+            // Use the last branch to cover the current position (O(1) operation, saves gas)
+            if (branchIdx < _branchNames.length - 1) {
+                bytes memory lastBranchName = _branchNames[_branchNames.length - 1];
+                bytes32 lastRefKey = _keccak256(lastBranchName);
+                _branchNameIndex[lastRefKey] = branchIdx; // Update the index of the last branch
+                _branchNames[branchIdx] = lastBranchName;
+            }
+            _branchNames.pop();
+            delete _branchNameIndex[refKey]; // Clean up index mapping
+
+            // 2. Logical clear: Only modify activeLength and exists, do not touch the physical array (Gas saving)
+            branch.activeLength = 0;
+            branch.headOid = bytes20(0);
+            branch.exists = false;
+
+            // Emit deletion event
+            emit BranchDeleted(refName, block.timestamp);
+            return;
+        }
+
+        // ====== Scenario 2: Full History Replacement (parentOid=0, new chain has no common ancestor) ======
+        if (parentOid == bytes20(0)) {
+            // 1. Logical clear of old records (activeLength reset to 0)
+            branch.activeLength = 0;
+
+            // 2. Add new record (index=0, overrides old data or adds new)
+            records[branch.activeLength] = PushRecord({
+                newOid: newOid,
+                parentOid: parentOid,
+                packfileKey: packfileKey,
+                size: packfileSize,
+                timestamp: block.timestamp,
+                pusher: msg.sender
+            });
+            branch.activeLength++; // Active length becomes 1
+
+            // 3. Update branch head
+            branch.headOid = newOid;
+
+            // Emit force update event
+            emit ForceRefUpdated(refKey, refName, oldOid, newOid, block.timestamp);
+            return;
+        }
+
+        // ====== Scenario 3: Partial History Replacement (parentOid≠0, truncate to parent record) ======
+        // Boundary check 1: parentIndex must be within the logical active range
+        require(parentIndex < branch.activeLength, "EthsHub: Parent index out of valid range");
+        // Boundary check 2: parentOid must match the record at the index (ensure correct parent record)
+        require(records[parentIndex].newOid == parentOid, "EthsHub: Parent OID not match");
+        // NOTE: Changed from records[parentIndex].parentOid to .newOid as parentOid is usually the 'old' head
+
+        // 1. Logical truncation: Active length set to parentIndex + 1 (subsequent records are considered invalid)
+        branch.activeLength = parentIndex + 1;
+
+        // 2. Add new record (index=current activeLength, overrides or adds new)
+        records[branch.activeLength] = PushRecord({
             newOid: newOid,
-            parentOid: parentOid, // Stored as the parent of the new commit, not the original branch head
+            parentOid: parentOid,
             packfileKey: packfileKey,
             size: packfileSize,
             timestamp: block.timestamp,
             pusher: msg.sender
         });
+        branch.activeLength++; // Active length + 1 (includes the new record)
 
-        branch.recordCount++;
+        // 3. Update branch head
+        branch.headOid = newOid;
 
+        // Emit force update event
         emit ForceRefUpdated(refKey, refName, oldOid, newOid, block.timestamp);
     }
 
     // Set default branch
     function setDefaultBranch(bytes calldata branchName) external onlyMaintainer {
-        bytes32 key = _keccak256(branchName);
-        require(_branches[key].exists, "EthsHub: Branch not exists");
+        bytes32 refKey = _keccak256(branchName);
+        require(_branches[refKey].exists, "EthsHub: Branch not exists");
 
         bytes memory oldBranch = defaultBranchName;
         defaultBranchName = branchName;
@@ -207,8 +286,10 @@ contract EthsHub is Initializable, AccessControlUpgradeable, ReentrancyGuard {
         emit DefaultBranchChanged(oldBranch, branchName);
     }
 
-    // ---------------------- Query ----------------------
-    // Query function: Get branch list (paginated)
+    // ======================== Query ========================
+    /**
+     * @dev Paginates and retrieves the list of branches (only returns active branches).
+     */
     function listBranches(uint256 start, uint256 limit) external view returns (RefData[] memory list) {
         uint256 end = start + limit;
         if (end > _branchNames.length) {
@@ -219,47 +300,63 @@ contract EthsHub is Initializable, AccessControlUpgradeable, ReentrancyGuard {
         list = new RefData[](count);
         for (uint256 i = 0; i < count; i++) {
             bytes memory branchName = _branchNames[start + i];
-            bytes32 key = _keccak256(branchName);
-            list[i] = RefData({name: branchName, hash: _branches[key].headOid});
+            bytes32 refKey = _keccak256(branchName);
+            list[i] = RefData({name: branchName, hash: _branches[refKey].headOid});
         }
     }
 
-    // Query function: Get total branch count
+    /**
+     * @dev Gets the total count of active branches.
+     */
     function getBranchCount() external view returns (uint256) {
         return _branchNames.length;
     }
 
-    // Query function: Get default branch
+    /**
+     * @dev Gets the default branch information.
+     */
     function getDefaultBranch() external view returns (bytes memory name, bytes20 headOid) {
-        return (defaultBranchName, _branches[_keccak256(defaultBranchName)].headOid);
+        bytes32 refKey = _keccak256(defaultBranchName);
+        return (defaultBranchName, _branches[refKey].headOid);
     }
 
-    // Query function: Get branch head info
+    /**
+     * @dev Gets the latest head information for a branch.
+     */
     function getBranchHead(bytes calldata refName) external view returns (bytes20 headOid, bool exists) {
         bytes32 refKey = _keccak256(refName);
         Branch storage branch = _branches[refKey];
         return (branch.headOid, branch.exists);
     }
 
-    // Query function: Get push records (for efficient history fetching)
+    /**
+     * @dev Paginates and retrieves push records (only returns logically valid records).
+     */
     function getPushRecords(bytes calldata refName, uint256 startIndex, uint256 count)
         external
         view
         returns (PushRecord[] memory)
     {
-        bytes32 refKey = _keccak256(refName); // Note: Already optimized by the helper function
+        bytes32 refKey = _keccak256(refName);
         Branch storage branch = _branches[refKey];
+        PushRecord[] storage records = _branchRecords[refKey];
         require(branch.exists, "EthsHub: Branch not exists");
 
+        // Boundary 1: If startIndex is out of the active range, return an empty array
+        if (startIndex >= branch.activeLength) {
+            return new PushRecord[](0);
+        }
+        // Boundary 2: endIndex must not exceed the logical active length
         uint256 endIndex = startIndex + count;
-        if (endIndex > branch.recordCount) {
-            endIndex = branch.recordCount;
+        if (endIndex > branch.activeLength) {
+            endIndex = branch.activeLength;
         }
 
-        uint256 resultCount = endIndex > startIndex ? endIndex - startIndex : 0;
+        // Assemble the valid records
+        uint256 resultCount = endIndex - startIndex;
         PushRecord[] memory results = new PushRecord[](resultCount);
         for (uint256 i = 0; i < resultCount; i++) {
-            results[i] = _branchRecords[refKey][startIndex + i];
+            results[i] = records[startIndex + i]; // Only retrieve records within the active range
         }
         return results;
     }
@@ -273,7 +370,7 @@ contract EthsHub is Initializable, AccessControlUpgradeable, ReentrancyGuard {
             selector := calldataload(0)
         }
 
-        // write check
+        // Write check: Restrict access to DB write functions to authorized roles
         if (
             selector == 0xc1d71b17 // writeChunksByBlobs
                 || selector == 0x6c0a0207 // remove

@@ -158,6 +158,7 @@ contract EthsHub is Initializable, AccessControlUpgradeable, ReentrancyGuard {
         }
 
         // 3. Core: Use indexed assignment instead of push, do not modify physical array length explicitly
+        // Assign to the index corresponding to the "current active length" (physical array auto-expands if needed)
         PushRecord memory newRecord = PushRecord({
             newOid: newOid,
             parentOid: parentOid,
@@ -166,9 +167,7 @@ contract EthsHub is Initializable, AccessControlUpgradeable, ReentrancyGuard {
             timestamp: block.timestamp,
             pusher: msg.sender
         });
-
-        // Assign to the index corresponding to the "current active length" (physical array auto-expands if needed)
-        records[branch.activeLength] = newRecord;
+        _writeRecord(records, branch.activeLength, newRecord);
         // Increment logical active length (marks this record as valid)
         branch.activeLength++;
 
@@ -229,7 +228,7 @@ contract EthsHub is Initializable, AccessControlUpgradeable, ReentrancyGuard {
             branch.activeLength = 0;
 
             // 2. Add new record (index=0, overrides old data or adds new)
-            records[branch.activeLength] = PushRecord({
+            PushRecord memory newRecord1 = PushRecord({
                 newOid: newOid,
                 parentOid: parentOid,
                 packfileKey: packfileKey,
@@ -237,6 +236,7 @@ contract EthsHub is Initializable, AccessControlUpgradeable, ReentrancyGuard {
                 timestamp: block.timestamp,
                 pusher: msg.sender
             });
+            _writeRecord(records, branch.activeLength, newRecord1);
             branch.activeLength++; // Active length becomes 1
 
             // 3. Update branch head
@@ -258,7 +258,7 @@ contract EthsHub is Initializable, AccessControlUpgradeable, ReentrancyGuard {
         branch.activeLength = parentIndex + 1;
 
         // 2. Add new record (index=current activeLength, overrides or adds new)
-        records[branch.activeLength] = PushRecord({
+        PushRecord memory newRecord2 = PushRecord({
             newOid: newOid,
             parentOid: parentOid,
             packfileKey: packfileKey,
@@ -266,6 +266,7 @@ contract EthsHub is Initializable, AccessControlUpgradeable, ReentrancyGuard {
             timestamp: block.timestamp,
             pusher: msg.sender
         });
+        _writeRecord(records, branch.activeLength, newRecord2);
         branch.activeLength++; // Active length + 1 (includes the new record)
 
         // 3. Update branch head
@@ -367,18 +368,20 @@ contract EthsHub is Initializable, AccessControlUpgradeable, ReentrancyGuard {
     fallback(bytes calldata data) external payable returns (bytes memory) {
         bytes4 selector;
         assembly {
-            selector := calldataload(0)
+            // Correctly load the 4-byte selector from the high-order bytes of calldata(0)
+            // by right-shifting the 32-byte word by 224 bits.
+            selector := shr(224, calldataload(0))
         }
 
         // Write check: Restrict access to DB write functions to authorized roles
         if (
             selector == 0xc1d71b17 // writeChunksByBlobs
-                || selector == 0x6c0a0207 // remove
-                || selector == 0x4d705e59 // truncate
+            || selector == 0x6c0a0207 // remove
+            || selector == 0x4d705e59 // truncate
         ) {
             require(
                 hasRole(PUSHER_ROLE, msg.sender) || hasRole(MAINTAINER_ROLE, msg.sender)
-                    || hasRole(DEFAULT_ADMIN_ROLE, msg.sender),
+                || hasRole(DEFAULT_ADMIN_ROLE, msg.sender),
                 "EthsHub: No write permission"
             );
         }
@@ -409,6 +412,32 @@ contract EthsHub is Initializable, AccessControlUpgradeable, ReentrancyGuard {
             // data is at p; data length is mload(data)
             // Actual content starts 32 bytes after the pointer (skipping the length)
             result := keccak256(add(data, 32), mload(data))
+        }
+    }
+
+    /**
+     * @dev Safely writes a PushRecord to the array based on the current activeLength.
+     * Performs an in-place overwrite if records.length > activeLength,
+     * or calls push() if records.length == activeLength to expand the physical array.
+     * @param records The physical PushRecord[] storage array.
+     * @param activeLength The current logical length (the index where the new record should go).
+     * @param newRecord The record data to write.
+     */
+    function _writeRecord(PushRecord[] storage records, uint256 activeLength, PushRecord memory newRecord) internal {
+        // 1. Case: Physical array is large enough (records.length > activeLength)
+        // This occurs after a forcePush has logically truncated the array. We safely overwrite the old, invalid data.
+        if (records.length > activeLength) {
+            records[activeLength] = newRecord;
+        }
+        // 2. Case: Physical array is exactly at the logical limit (records.length == activeLength)
+        // This is the normal appending case. We must use push() to physically expand the array by one.
+        else if (records.length == activeLength) {
+            records.push(newRecord);
+        }
+        // 3. Case: Integrity check (records.length < activeLength)
+        // This should never happen and indicates a storage corruption.
+        else {
+            revert("EthsHub: Storage corruption (Active length exceeds physical length)");
         }
     }
 }

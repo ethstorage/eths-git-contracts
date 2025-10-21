@@ -6,7 +6,7 @@ import {console} from "forge-std/console.sol";
 import {EthsHub} from "../src/EthsHub.sol";
 import {IFlatDirectoryFactory} from "../src/interfaces/IFlatDirectoryFactory.sol";
 
-contract MockFlatDirectoryFactory is IFlatDirectoryFactory{
+contract MockFlatDirectoryFactory is IFlatDirectoryFactory {
     address public created;
 
     function create() external returns (address) {

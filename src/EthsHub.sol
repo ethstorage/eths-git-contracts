@@ -34,6 +34,7 @@ contract EthsHub is Initializable, AccessControlUpgradeable, ReentrancyGuard {
         bytes20 headOid; // Latest commit oid of the branch
         uint256 activeLength; // Logical count of valid records (core field, replaces array length)
         bool exists; // Whether the branch exists
+        address creator; // branch creator
     }
 
     // Branch list query return structure
@@ -82,7 +83,7 @@ contract EthsHub is Initializable, AccessControlUpgradeable, ReentrancyGuard {
         db = _dbFactory.create();
     }
 
-    // ======================== Permission check modifiers ========================
+    // ======================== Permission ========================
     modifier onlyPusher() {
         _onlyPusher();
         _;
@@ -108,7 +109,15 @@ contract EthsHub is Initializable, AccessControlUpgradeable, ReentrancyGuard {
         );
     }
 
-    // ======================== Permission management ========================
+    function canPush(address account) external view returns (bool) {
+        return
+            hasRole(PUSHER_ROLE, account) || hasRole(MAINTAINER_ROLE, account) || hasRole(DEFAULT_ADMIN_ROLE, account);
+    }
+
+    function canMaintain(address account) external view returns (bool) {
+        return hasRole(MAINTAINER_ROLE, account) || hasRole(DEFAULT_ADMIN_ROLE, account);
+    }
+
     function addPusher(address account) external onlyMaintainer {
         grantRole(PUSHER_ROLE, account);
     }
@@ -140,6 +149,7 @@ contract EthsHub is Initializable, AccessControlUpgradeable, ReentrancyGuard {
             require(parentOid == bytes20(0), "EthsHub: First push must have no parent");
             branch.headOid = newOid;
             branch.exists = true;
+            branch.creator = msg.sender;
             branch.activeLength = 0; // Initial active length is 0 (no valid records yet)
 
             // Record branch name and index
@@ -188,11 +198,16 @@ contract EthsHub is Initializable, AccessControlUpgradeable, ReentrancyGuard {
         uint256 packfileSize,
         bytes20 parentOid,
         uint256 parentIndex
-    ) external onlyMaintainer nonReentrant {
+    ) external nonReentrant {
         bytes32 refKey = _keccak256(refName);
         Branch storage branch = _branches[refKey];
         PushRecord[] storage records = _branchRecords[refKey];
         require(branch.exists, "EthsHub: Branch does not exist");
+        require(
+            msg.sender == branch.creator || hasRole(MAINTAINER_ROLE, msg.sender)
+                || hasRole(DEFAULT_ADMIN_ROLE, msg.sender),
+            "EthsHub: No permission to delete branch"
+        );
 
         bytes20 oldOid = branch.headOid; // Record old head for event traceability
 
@@ -218,6 +233,7 @@ contract EthsHub is Initializable, AccessControlUpgradeable, ReentrancyGuard {
             // 2. Logical clear: Only modify activeLength and exists, do not touch the physical array (Gas saving)
             branch.activeLength = 0;
             branch.headOid = bytes20(0);
+            branch.creator = address(0);
             branch.exists = false;
 
             // Emit deletion event

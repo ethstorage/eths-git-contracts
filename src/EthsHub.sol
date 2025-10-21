@@ -114,6 +114,12 @@ contract EthsHub is Initializable, AccessControlUpgradeable, ReentrancyGuard {
             hasRole(PUSHER_ROLE, account) || hasRole(MAINTAINER_ROLE, account) || hasRole(DEFAULT_ADMIN_ROLE, account);
     }
 
+    function canForcePush(address account, bytes calldata refName) external view returns (bool) {
+        bytes32 refKey = _keccak256(refName);
+        Branch storage branch = _branches[refKey];
+        return account == branch.creator || hasRole(MAINTAINER_ROLE, account) || hasRole(DEFAULT_ADMIN_ROLE, account);
+    }
+
     function canMaintain(address account) external view returns (bool) {
         return hasRole(MAINTAINER_ROLE, account) || hasRole(DEFAULT_ADMIN_ROLE, account);
     }

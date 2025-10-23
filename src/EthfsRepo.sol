@@ -6,7 +6,7 @@ import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Ini
 import {AccessControlUpgradeable} from "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
 import {IFlatDirectoryFactory} from "./interfaces/IFlatDirectoryFactory.sol";
 
-contract EthsHub is Initializable, AccessControlUpgradeable, ReentrancyGuard {
+contract EthfsRepo is Initializable, AccessControlUpgradeable, ReentrancyGuard {
     // Role definitions - Minimum permission set
     bytes32 public constant MAINTAINER_ROLE = keccak256("MAINTAINER_ROLE");
     bytes32 public constant PUSHER_ROLE = keccak256("PUSHER_ROLE");
@@ -47,7 +47,7 @@ contract EthsHub is Initializable, AccessControlUpgradeable, ReentrancyGuard {
     // Repository metadata
     bytes public repoName;
     bytes public defaultBranchName;
-    address public db; // Address of the database storing packfiles
+    address public flatDirectory; // Address of the file storing packfiles
 
     // Branch mapping: refKey (hash of branch name) → Branch info
     mapping(bytes32 => Branch) private _branches; // refKey => Branch information
@@ -59,11 +59,11 @@ contract EthsHub is Initializable, AccessControlUpgradeable, ReentrancyGuard {
     mapping(bytes32 => uint256) private _branchNameIndex;
 
     // Initialization function
-    function initialize(address _owner, bytes memory _repoName, IFlatDirectoryFactory _dbFactory) external initializer {
+    function initialize(address _owner, bytes memory _repoName, IFlatDirectoryFactory _flatDirectoryFactory) external initializer {
         __AccessControl_init();
 
-        require(_owner != address(0), "EthsHub: Invalid owner");
-        require(_repoName.length > 0 && _repoName.length <= 100, "EthsHub: Invalid repo name length");
+        require(_owner != address(0), "EthfsRepo: Invalid owner");
+        require(_repoName.length > 0 && _repoName.length <= 100, "EthfsRepo: Invalid repo name length");
         for (uint256 i; i < _repoName.length; i++) {
             bytes1 char = _repoName[i];
             require(
@@ -71,7 +71,7 @@ contract EthsHub is Initializable, AccessControlUpgradeable, ReentrancyGuard {
                     || (char >= 0x41 && char <= 0x5A) // A-Z
                     || (char >= 0x30 && char <= 0x39) // 0-9
                     || (char == 0x2D || char == 0x2E || char == 0x5F), // -._
-                "EthsHub: Repo name must be alphanumeric or -._"
+                "EthfsRepo: Repo name must be alphanumeric or -._"
             );
         }
 
@@ -80,7 +80,7 @@ contract EthsHub is Initializable, AccessControlUpgradeable, ReentrancyGuard {
         _grantRole(PUSHER_ROLE, _owner);
 
         repoName = _repoName;
-        db = _dbFactory.create();
+        flatDirectory = _flatDirectoryFactory.create();
     }
 
     // ======================== Permission ========================
@@ -93,7 +93,7 @@ contract EthsHub is Initializable, AccessControlUpgradeable, ReentrancyGuard {
         require(
             hasRole(PUSHER_ROLE, msg.sender) || hasRole(MAINTAINER_ROLE, msg.sender)
                 || hasRole(DEFAULT_ADMIN_ROLE, msg.sender),
-            "EthsHub: No push permission"
+            "EthfsRepo: No push permission"
         );
     }
 
@@ -105,7 +105,7 @@ contract EthsHub is Initializable, AccessControlUpgradeable, ReentrancyGuard {
     function _onlyMaintainer() internal view {
         require(
             hasRole(MAINTAINER_ROLE, msg.sender) || hasRole(DEFAULT_ADMIN_ROLE, msg.sender),
-            "EthsHub: No maintainer permission"
+            "EthfsRepo: No maintainer permission"
         );
     }
 
@@ -152,7 +152,7 @@ contract EthsHub is Initializable, AccessControlUpgradeable, ReentrancyGuard {
 
         // 1. First push to this branch
         if (!branch.exists) {
-            require(parentOid == bytes20(0), "EthsHub: First push must have no parent");
+            require(parentOid == bytes20(0), "EthfsRepo: First push must have no parent");
             branch.headOid = newOid;
             branch.exists = true;
             branch.creator = msg.sender;
@@ -169,7 +169,7 @@ contract EthsHub is Initializable, AccessControlUpgradeable, ReentrancyGuard {
         }
         // 2. Subsequent push (must be fast-forward: Parent OID must match current branch head)
         else {
-            require(branch.headOid == parentOid, "EthsHub: Non fast-forward push not allowed");
+            require(branch.headOid == parentOid, "EthfsRepo: Non fast-forward push not allowed");
             branch.headOid = newOid;
         }
 
@@ -208,11 +208,11 @@ contract EthsHub is Initializable, AccessControlUpgradeable, ReentrancyGuard {
         bytes32 refKey = _keccak256(refName);
         Branch storage branch = _branches[refKey];
         PushRecord[] storage records = _branchRecords[refKey];
-        require(branch.exists, "EthsHub: Branch does not exist");
+        require(branch.exists, "EthfsRepo: Branch does not exist");
         require(
             msg.sender == branch.creator || hasRole(MAINTAINER_ROLE, msg.sender)
                 || hasRole(DEFAULT_ADMIN_ROLE, msg.sender),
-            "EthsHub: No permission to delete branch"
+            "EthfsRepo: No permission to delete branch"
         );
 
         bytes20 oldOid = branch.headOid; // Record old head for event traceability
@@ -220,11 +220,11 @@ contract EthsHub is Initializable, AccessControlUpgradeable, ReentrancyGuard {
         // ====== Scenario 1: Delete Branch (newOid=0, Logical clear) ======
         if (newOid == bytes20(0)) {
             bytes32 defaultRefKey = _keccak256(defaultBranchName);
-            require(refKey != defaultRefKey, "EthsHub: Cannot delete default branch");
+            require(refKey != defaultRefKey, "EthfsRepo: Cannot delete default branch");
 
             // 1. Remove branch name from _branchNames (avoid counting invalid branches)
             uint256 branchIdx = _branchNameIndex[refKey];
-            require(branchIdx < _branchNames.length, "EthsHub: Branch not in name list");
+            require(branchIdx < _branchNames.length, "EthfsRepo: Branch not in name list");
 
             // Use the last branch to cover the current position (O(1) operation, saves gas)
             if (branchIdx < _branchNames.length - 1) {
@@ -274,9 +274,9 @@ contract EthsHub is Initializable, AccessControlUpgradeable, ReentrancyGuard {
 
         // ====== Scenario 3: Partial History Replacement (parentOid≠0, truncate to parent record) ======
         // Boundary check 1: parentIndex must be within the logical active range
-        require(parentIndex < branch.activeLength, "EthsHub: Parent index out of valid range");
+        require(parentIndex < branch.activeLength, "EthfsRepo: Parent index out of valid range");
         // Boundary check 2: parentOid must match the record at the index (ensure correct parent record)
-        require(records[parentIndex].newOid == parentOid, "EthsHub: Parent OID not match");
+        require(records[parentIndex].newOid == parentOid, "EthfsRepo: Parent OID not match");
         // NOTE: Changed from records[parentIndex].parentOid to .newOid as parentOid is usually the 'old' head
 
         // 1. Logical truncation: Active length set to parentIndex + 1 (subsequent records are considered invalid)
@@ -304,7 +304,7 @@ contract EthsHub is Initializable, AccessControlUpgradeable, ReentrancyGuard {
     // Set default branch
     function setDefaultBranch(bytes calldata branchName) external onlyMaintainer {
         bytes32 refKey = _keccak256(branchName);
-        require(_branches[refKey].exists, "EthsHub: Branch not exists");
+        require(_branches[refKey].exists, "EthfsRepo: Branch not exists");
 
         bytes memory oldBranch = defaultBranchName;
         defaultBranchName = branchName;
@@ -366,7 +366,7 @@ contract EthsHub is Initializable, AccessControlUpgradeable, ReentrancyGuard {
         bytes32 refKey = _keccak256(refName);
         Branch storage branch = _branches[refKey];
         PushRecord[] storage records = _branchRecords[refKey];
-        require(branch.exists, "EthsHub: Branch not exists");
+        require(branch.exists, "EthfsRepo: Branch not exists");
 
         // Boundary 1: If startIndex is out of the active range, return an empty array
         if (startIndex >= branch.activeLength) {
@@ -387,6 +387,12 @@ contract EthsHub is Initializable, AccessControlUpgradeable, ReentrancyGuard {
         return results;
     }
 
+    function getPushRecordCount(bytes calldata refName) external view returns (uint256 count) {
+        bytes32 refKey = _keccak256(refName);
+        Branch storage branch = _branches[refKey];
+        count = branch.activeLength;
+    }
+
     // ---------------------- Database fallback ----------------------
 
     // Database interaction proxy (forward necessary calls only)
@@ -398,7 +404,7 @@ contract EthsHub is Initializable, AccessControlUpgradeable, ReentrancyGuard {
             selector := shr(224, calldataload(0))
         }
 
-        // Write check: Restrict access to DB write functions to authorized roles
+        // Write check: Restrict access to flatDirectory write functions to authorized roles
         if (
             selector == 0xc1d71b17 // writeChunksByBlobs
                 || selector == 0x6c0a0207 // remove
@@ -407,11 +413,11 @@ contract EthsHub is Initializable, AccessControlUpgradeable, ReentrancyGuard {
             require(
                 hasRole(PUSHER_ROLE, msg.sender) || hasRole(MAINTAINER_ROLE, msg.sender)
                     || hasRole(DEFAULT_ADMIN_ROLE, msg.sender),
-                "EthsHub: No write permission"
+                "EthfsRepo: No write permission"
             );
         }
 
-        (bool success, bytes memory result) = db.call{value: msg.value}(data);
+        (bool success, bytes memory result) = flatDirectory.call{value: msg.value}(data);
         if (!success) {
             // Revert with the returned data from the call (standard pattern)
             assembly {
@@ -462,7 +468,7 @@ contract EthsHub is Initializable, AccessControlUpgradeable, ReentrancyGuard {
         // 3. Case: Integrity check (records.length < activeLength)
         // This should never happen and indicates a storage corruption.
         else {
-            revert("EthsHub: Storage corruption (Active length exceeds physical length)");
+            revert("EthfsRepo: Storage corruption (Active length exceeds physical length)");
         }
     }
 }

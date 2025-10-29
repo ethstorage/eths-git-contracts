@@ -10,22 +10,36 @@ contract MockFlatDirectoryFactory is IFlatDirectoryFactory {
     address public created;
 
     function create() external returns (address) {
-        created = address(new MockDB());
+        created = address(new MockFlatDirectory());
         return created;
     }
 }
 
-contract MockDB {
+contract MockFlatDirectory {
+    mapping(bytes => uint256) public files;
+
+    function upload(bytes calldata _key, uint256 _size) external {
+        files[_key] = _size;
+    }
+
+    function size(bytes calldata _key) external view returns (uint256) {
+        return files[_key];
+    }
+
     // allow arbitrary fallback call
-    fallback(bytes calldata data) external payable returns (bytes memory) {
-        console.logBytes(data);
+    fallback(bytes calldata _data) external payable returns (bytes memory) {
+        console.logBytes(_data);
         return abi.encode("ok");
     }
+
+    receive() external payable {}
 }
 
-contract EthfsRepoTest is Test {
+contract EthsRepoTest is Test {
     EthsRepo repo;
     MockFlatDirectoryFactory factory;
+    MockFlatDirectory db;
+
     address owner = address(0x1);
     address maintainer = address(0x2);
     address pusher = address(0x3);
@@ -51,11 +65,31 @@ contract EthfsRepoTest is Test {
         vm.stopPrank();
     }
 
+    function _uploadPack(bytes20 packKey, uint256 size) internal {
+        address fdAddr = repo.flatDirectory();
+        MockFlatDirectory fd = MockFlatDirectory(payable(fdAddr));
+        fd.upload(abi.encodePacked(packKey), size);
+    }
+
+    function _push(
+        bytes calldata branch,
+        bytes20 parentOid,
+        bytes20 newOid,
+        bytes20 packKey,
+        uint256 packSize
+    ) internal {
+        _uploadPack(packKey, packSize);
+        vm.startPrank(pusher);
+        repo.push(branch, parentOid, newOid, packKey, packSize);
+        vm.stopPrank();
+    }
+
     // ---------------- Basic push ----------------
     function testPushFirstAndSecond() public {
         vm.startPrank(pusher);
 
         // First push: must have no parent
+        _uploadPack(PACK1, 100);
         repo.push(BRANCH_MAIN, ZERO_OID, OID1, PACK1, 100);
 
         (bytes20 head, bool exists) = repo.getBranchHead(BRANCH_MAIN);
@@ -63,6 +97,7 @@ contract EthfsRepoTest is Test {
         assertEq(head, OID1);
 
         // Second push: must fast-forward
+        _uploadPack(PACK2, 200);
         repo.push(BRANCH_MAIN, OID1, OID2, PACK2, 200);
         (head, exists) = repo.getBranchHead(BRANCH_MAIN);
         assertEq(head, OID2);
@@ -76,6 +111,7 @@ contract EthfsRepoTest is Test {
     // ---------------- Force push: delete branch ----------------
     function testForcePushDeleteDefaultBranchShouldFail() public {
         vm.startPrank(pusher);
+        _uploadPack(PACK1, 100);
         repo.push(BRANCH_MAIN, ZERO_OID, OID1, PACK1, 100);
         vm.stopPrank();
 
@@ -88,11 +124,13 @@ contract EthfsRepoTest is Test {
     function testForcePushDeleteNonDefaultBranch() public {
         // step 1: create default branch first
         vm.startPrank(pusher);
+        _uploadPack(PACK1, 100);
         repo.push(BRANCH_MAIN, ZERO_OID, OID1, PACK1, 100);
         vm.stopPrank();
 
         // step 2: create another branch
         vm.startPrank(pusher);
+        _uploadPack(PACK2, 200);
         repo.push("dev", ZERO_OID, OID2, PACK2, 200);
         vm.stopPrank();
 
@@ -112,12 +150,15 @@ contract EthfsRepoTest is Test {
     // ---------------- Force push: full history replace ----------------
     function testForcePushFullHistoryReplace() public {
         vm.startPrank(pusher);
+        _uploadPack(PACK1, 100);
         repo.push(BRANCH_MAIN, ZERO_OID, OID1, PACK1, 100);
+        _uploadPack(PACK2, 200);
         repo.push(BRANCH_MAIN, OID1, OID2, PACK2, 200);
         vm.stopPrank();
 
         vm.startPrank(maintainer);
         // parentOid=0 means full history replace
+        _uploadPack(PACK3, 300);
         repo.forcePush(BRANCH_MAIN, OID3, PACK3, 300, ZERO_OID, 0);
         vm.stopPrank();
 
@@ -131,12 +172,15 @@ contract EthfsRepoTest is Test {
     // ---------------- Force push: partial truncate ----------------
     function testForcePushPartialTruncate() public {
         vm.startPrank(pusher);
+        _uploadPack(PACK1, 100);
         repo.push(BRANCH_MAIN, ZERO_OID, OID1, PACK1, 100);
+        _uploadPack(PACK2, 200);
         repo.push(BRANCH_MAIN, OID1, OID2, PACK2, 200);
         vm.stopPrank();
 
         // parentIndex=0 (keep only first record)
         vm.startPrank(maintainer);
+        _uploadPack(PACK3, 300);
         repo.forcePush(BRANCH_MAIN, OID3, PACK3, 300, OID1, 0);
         vm.stopPrank();
 
@@ -148,7 +192,9 @@ contract EthfsRepoTest is Test {
     // ---------------- Branch enumeration ----------------
     function testListBranchesPagination() public {
         vm.startPrank(pusher);
+        _uploadPack(PACK1, 100);
         repo.push("dev", ZERO_OID, OID1, PACK1, 100);
+        _uploadPack(PACK2, 100);
         repo.push("main", ZERO_OID, OID2, PACK2, 100);
         vm.stopPrank();
 
@@ -165,6 +211,7 @@ contract EthfsRepoTest is Test {
     // ---------------- Default branch change ----------------
     function testSetDefaultBranch() public {
         vm.startPrank(pusher);
+        _uploadPack(PACK1, 100);
         repo.push("dev", ZERO_OID, OID1, PACK1, 100);
         vm.stopPrank();
 
@@ -179,6 +226,7 @@ contract EthfsRepoTest is Test {
     // ---------------- Defensive getPushRecords ----------------
     function testGetPushRecordsOutOfRange() public {
         vm.startPrank(pusher);
+        _uploadPack(PACK1, 100);
         repo.push(BRANCH_MAIN, ZERO_OID, OID1, PACK1, 100);
         vm.stopPrank();
 
@@ -189,6 +237,7 @@ contract EthfsRepoTest is Test {
     // ---------------- Fallback proxy path ----------------
     function testFallbackDelegatesToDB() public {
         vm.startPrank(pusher);
+        _uploadPack(PACK1, 100);
         repo.push(BRANCH_MAIN, ZERO_OID, OID1, PACK1, 100);
         vm.stopPrank();
 

@@ -5,8 +5,9 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import {AccessControlUpgradeable} from "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
 import {IFlatDirectoryFactory} from "./interfaces/IFlatDirectoryFactory.sol";
+import {IFlatDirectory} from "./interfaces/IFlatDirectory.sol";
 
-contract EthfsRepo is Initializable, AccessControlUpgradeable, ReentrancyGuard {
+contract EthsRepo is Initializable, AccessControlUpgradeable, ReentrancyGuard {
     // Role definitions - Minimum permission set
     bytes32 public constant MAINTAINER_ROLE = keccak256("MAINTAINER_ROLE");
     bytes32 public constant PUSHER_ROLE = keccak256("PUSHER_ROLE");
@@ -150,6 +151,9 @@ contract EthfsRepo is Initializable, AccessControlUpgradeable, ReentrancyGuard {
         Branch storage branch = _branches[refKey];
         PushRecord[] storage records = _branchRecords[refKey]; // Reference to the physical array
 
+        uint256 realSize = IFlatDirectory(flatDirectory).size(abi.encodePacked(packfileKey));
+        require(realSize == packfileSize, "File not uploaded or size mismatch");
+
         // 1. First push to this branch
         if (!branch.exists) {
             require(parentOid == bytes20(0), "EthfsRepo: First push must have no parent");
@@ -246,6 +250,9 @@ contract EthfsRepo is Initializable, AccessControlUpgradeable, ReentrancyGuard {
             emit BranchDeleted(refName, block.timestamp);
             return;
         }
+
+        uint256 realSize = IFlatDirectory(flatDirectory).size(abi.encodePacked(packfileKey));
+        require(realSize == packfileSize, "File not uploaded or size mismatch");
 
         // ====== Scenario 2: Full History Replacement (parentOid=0, new chain has no common ancestor) ======
         if (parentOid == bytes20(0)) {

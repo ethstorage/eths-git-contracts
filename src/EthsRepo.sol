@@ -13,18 +13,16 @@ contract EthsRepo is Initializable, AccessControlUpgradeable, ReentrancyGuard {
     bytes32 public constant PUSHER_ROLE = keccak256("PUSHER_ROLE");
 
     // Event definitions - Record key information only
-    event RefUpdated(
-        bytes32 indexed refKey, bytes refName, bytes20 oldOid, bytes20 newOid, uint256 packfileSize, uint256 timestamp
-    );
-    event ForceRefUpdated(bytes32 indexed refKey, bytes refName, bytes20 oldOid, bytes20 newOid, uint256 timestamp);
-    event BranchDeleted(bytes refName, uint256 timestamp);
+    event RefUpdated(bytes32 indexed refKey, bytes20 oldOid, bytes20 newOid);
+    event ForceRefUpdated(bytes32 indexed refKey, bytes20 oldOid, bytes20 newOid);
+    event BranchDeleted(bytes32 indexed refKey);
     event DefaultBranchChanged(bytes oldBranch, bytes newBranch);
 
     // Lightweight Commit Information - Minimal data storage
     struct PushRecord {
         bytes20 newOid; // Final commit oid of the current push
         bytes20 parentOid; // Parent commit oid, used to build history chain
-        bytes20 packfileKey; // Key for storing the packfile
+        bytes packfileKey; // Key for storing the packfile
         uint256 size; // Packfile size
         uint256 timestamp; // Timestamp
         address pusher; // Pusher address
@@ -60,7 +58,10 @@ contract EthsRepo is Initializable, AccessControlUpgradeable, ReentrancyGuard {
     mapping(bytes32 => uint256) private _branchNameIndex;
 
     // Initialization function
-    function initialize(address _owner, bytes memory _repoName, IFlatDirectoryFactory _flatDirectoryFactory) external initializer {
+    function initialize(address _owner, bytes memory _repoName, IFlatDirectoryFactory _flatDirectoryFactory)
+        external
+        initializer
+    {
         __AccessControl_init();
 
         require(_owner != address(0), "EthfsRepo: Invalid owner");
@@ -142,16 +143,18 @@ contract EthsRepo is Initializable, AccessControlUpgradeable, ReentrancyGuard {
      * @dev Normal push (fast-forward)
      * Core: Uses indexed assignment instead of push, marks valid records via activeLength.
      */
-    function push(bytes calldata refName, bytes20 parentOid, bytes20 newOid, bytes20 packfileKey, uint256 packfileSize)
-        external
-        onlyPusher
-        nonReentrant
-    {
+    function push(
+        bytes calldata refName,
+        bytes20 parentOid,
+        bytes20 newOid,
+        bytes calldata packfileKey,
+        uint256 packfileSize
+    ) external onlyPusher nonReentrant {
         bytes32 refKey = _keccak256(refName);
         Branch storage branch = _branches[refKey];
         PushRecord[] storage records = _branchRecords[refKey]; // Reference to the physical array
 
-        uint256 realSize = IFlatDirectory(flatDirectory).size(abi.encodePacked(packfileKey));
+        uint256 realSize = IFlatDirectory(flatDirectory).size(packfileKey);
         require(realSize == packfileSize, "File not uploaded or size mismatch");
 
         // 1. First push to this branch
@@ -192,7 +195,7 @@ contract EthsRepo is Initializable, AccessControlUpgradeable, ReentrancyGuard {
         branch.activeLength++;
 
         // Emit event
-        emit RefUpdated(refKey, refName, parentOid, newOid, packfileSize, block.timestamp);
+        emit RefUpdated(refKey, parentOid, newOid);
     }
 
     /**
@@ -204,7 +207,7 @@ contract EthsRepo is Initializable, AccessControlUpgradeable, ReentrancyGuard {
     function forcePush(
         bytes calldata refName,
         bytes20 newOid,
-        bytes20 packfileKey,
+        bytes calldata packfileKey,
         uint256 packfileSize,
         bytes20 parentOid,
         uint256 parentIndex
@@ -216,81 +219,109 @@ contract EthsRepo is Initializable, AccessControlUpgradeable, ReentrancyGuard {
         require(
             msg.sender == branch.creator || hasRole(MAINTAINER_ROLE, msg.sender)
                 || hasRole(DEFAULT_ADMIN_ROLE, msg.sender),
-            "EthfsRepo: No permission to delete branch"
+            "EthfsRepo: No permission to push or delete branch"
         );
 
         bytes20 oldOid = branch.headOid; // Record old head for event traceability
 
-        // ====== Scenario 1: Delete Branch (newOid=0, Logical clear) ======
+        // Scenario 1: Delete Branch (newOid=0)
         if (newOid == bytes20(0)) {
-            bytes32 defaultRefKey = _keccak256(defaultBranchName);
-            require(refKey != defaultRefKey, "EthfsRepo: Cannot delete default branch");
-
-            // 1. Remove branch name from _branchNames (avoid counting invalid branches)
-            uint256 branchIdx = _branchNameIndex[refKey];
-            require(branchIdx < _branchNames.length, "EthfsRepo: Branch not in name list");
-
-            // Use the last branch to cover the current position (O(1) operation, saves gas)
-            if (branchIdx < _branchNames.length - 1) {
-                bytes memory lastBranchName = _branchNames[_branchNames.length - 1];
-                bytes32 lastRefKey = _keccak256(lastBranchName);
-                _branchNameIndex[lastRefKey] = branchIdx; // Update the index of the last branch
-                _branchNames[branchIdx] = lastBranchName;
-            }
-            _branchNames.pop();
-            delete _branchNameIndex[refKey]; // Clean up index mapping
-
-            // 2. Logical clear: Only modify activeLength and exists, do not touch the physical array (Gas saving)
-            branch.activeLength = 0;
-            branch.headOid = bytes20(0);
-            branch.creator = address(0);
-            branch.exists = false;
-
-            // Emit deletion event
-            emit BranchDeleted(refName, block.timestamp);
+            _handleBranchDeletion(refKey, branch);
             return;
         }
 
-        uint256 realSize = IFlatDirectory(flatDirectory).size(abi.encodePacked(packfileKey));
+        // check packfile
+        uint256 realSize = IFlatDirectory(flatDirectory).size(packfileKey);
         require(realSize == packfileSize, "File not uploaded or size mismatch");
 
-        // ====== Scenario 2: Full History Replacement (parentOid=0, new chain has no common ancestor) ======
+        // Scenario 2: Full History Replacement (parentOid=0)
         if (parentOid == bytes20(0)) {
-            // 1. Logical clear of old records (activeLength reset to 0)
-            branch.activeLength = 0;
-
-            // 2. Add new record (index=0, overrides old data or adds new)
-            PushRecord memory newRecord1 = PushRecord({
-                newOid: newOid,
-                parentOid: parentOid,
-                packfileKey: packfileKey,
-                size: packfileSize,
-                timestamp: block.timestamp,
-                pusher: msg.sender
-            });
-            _writeRecord(records, branch.activeLength, newRecord1);
-            branch.activeLength++; // Active length becomes 1
-
-            // 3. Update branch head
-            branch.headOid = newOid;
-
-            // Emit force update event
-            emit ForceRefUpdated(refKey, refName, oldOid, newOid, block.timestamp);
+            _handleFullHistoryReplacement(refKey, branch, records, oldOid, newOid, packfileKey, packfileSize);
             return;
         }
 
-        // ====== Scenario 3: Partial History Replacement (parentOid≠0, truncate to parent record) ======
-        // Boundary check 1: parentIndex must be within the logical active range
+        // Scenario 3: Partial History Replacement (parentOid≠0)
+        _handlePartialHistoryReplacement(
+            refKey, branch, records, oldOid, newOid, packfileKey, packfileSize, parentOid, parentIndex
+        );
+    }
+
+    function _handleBranchDeletion(bytes32 refKey, Branch storage branch) private {
+        bytes32 defaultRefKey = _keccak256(defaultBranchName);
+        require(refKey != defaultRefKey, "EthfsRepo: Cannot delete default branch");
+
+        // 1. Remove branch name from _branchNames (O(1) swap-and-pop)
+        uint256 branchIdx = _branchNameIndex[refKey];
+        require(branchIdx < _branchNames.length, "EthfsRepo: Branch not in name list");
+
+        if (branchIdx < _branchNames.length - 1) {
+            bytes memory lastBranchName = _branchNames[_branchNames.length - 1];
+            bytes32 lastRefKey = _keccak256(lastBranchName);
+            _branchNameIndex[lastRefKey] = branchIdx;
+            _branchNames[branchIdx] = lastBranchName;
+        }
+        _branchNames.pop();
+        delete _branchNameIndex[refKey];
+
+        // 2. Logical clear
+        branch.activeLength = 0;
+        branch.headOid = bytes20(0);
+        branch.creator = address(0);
+        branch.exists = false;
+
+        emit BranchDeleted(refKey);
+    }
+
+    function _handleFullHistoryReplacement(
+        bytes32 refKey,
+        Branch storage branch,
+        PushRecord[] storage records,
+        bytes20 oldOid,
+        bytes20 newOid,
+        bytes calldata packfileKey,
+        uint256 packfileSize
+    ) private {
+        // 1. Logical clear of old records
+        branch.activeLength = 0;
+
+        // 2. Add new record (index=0)
+        PushRecord memory newRecord = PushRecord({
+            newOid: newOid,
+            parentOid: bytes20(0),
+            packfileKey: packfileKey,
+            size: packfileSize,
+            timestamp: block.timestamp,
+            pusher: msg.sender
+        });
+        _writeRecord(records, 0, newRecord);
+        branch.activeLength = 1;
+
+        // 3. Update branch head
+        branch.headOid = newOid;
+
+        emit ForceRefUpdated(refKey, oldOid, newOid);
+    }
+
+    function _handlePartialHistoryReplacement(
+        bytes32 refKey,
+        Branch storage branch,
+        PushRecord[] storage records,
+        bytes20 oldOid,
+        bytes20 newOid,
+        bytes calldata packfileKey,
+        uint256 packfileSize,
+        bytes20 parentOid,
+        uint256 parentIndex
+    ) private {
         require(parentIndex < branch.activeLength, "EthfsRepo: Parent index out of valid range");
-        // Boundary check 2: parentOid must match the record at the index (ensure correct parent record)
         require(records[parentIndex].newOid == parentOid, "EthfsRepo: Parent OID not match");
-        // NOTE: Changed from records[parentIndex].parentOid to .newOid as parentOid is usually the 'old' head
 
-        // 1. Logical truncation: Active length set to parentIndex + 1 (subsequent records are considered invalid)
-        branch.activeLength = parentIndex + 1;
+        // 1. Logical truncation: Active length set to parentIndex + 1
+        uint256 nextIndex = parentIndex + 1;
+        branch.activeLength = nextIndex;
 
-        // 2. Add new record (index=current activeLength, overrides or adds new)
-        PushRecord memory newRecord2 = PushRecord({
+        // 2. Add new record (index=nextIndex)
+        PushRecord memory newRecord = PushRecord({
             newOid: newOid,
             parentOid: parentOid,
             packfileKey: packfileKey,
@@ -298,14 +329,13 @@ contract EthsRepo is Initializable, AccessControlUpgradeable, ReentrancyGuard {
             timestamp: block.timestamp,
             pusher: msg.sender
         });
-        _writeRecord(records, branch.activeLength, newRecord2);
-        branch.activeLength++; // Active length + 1 (includes the new record)
+        _writeRecord(records, nextIndex, newRecord);
+        branch.activeLength++; // Active length + 1
 
         // 3. Update branch head
         branch.headOid = newOid;
 
-        // Emit force update event
-        emit ForceRefUpdated(refKey, refName, oldOid, newOid, block.timestamp);
+        emit ForceRefUpdated(refKey, oldOid, newOid);
     }
 
     // Set default branch

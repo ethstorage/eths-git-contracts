@@ -58,7 +58,11 @@ contract EthsHub is Ownable, ReentrancyGuard {
         return reposOf[user].length;
     }
 
-    function getUserReposPaginated(address user, uint256 start, uint256 limit) external view returns (RepoInfo[] memory) {
+    function getUserReposPaginated(address user, uint256 start, uint256 limit)
+        external
+        view
+        returns (RepoInfo[] memory)
+    {
         RepoInfo[] storage userRepos = reposOf[user];
 
         uint256 end = start + limit;

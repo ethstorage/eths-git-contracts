@@ -4,7 +4,6 @@ pragma solidity ^0.8.13;
 import {Script} from "forge-std/Script.sol";
 import {console} from "forge-std/console.sol";
 import {EthsHub} from "../src/EthsHub.sol";
-import {EthsRepo} from "../src/EthsRepo.sol";
 
 contract Deploy is Script {
     function run() public {
@@ -23,13 +22,7 @@ contract Deploy is Script {
         }
 
         EthsHub dir = new EthsHub(flatDirectoryFactory);
-        console.log("Deployed HubFactory at:", address(dir));
-
-        if (block.chainid == 11155111 || block.chainid == 3335) {
-            // test
-            EthsRepo impl = EthsRepo(payable(dir.createRepo("test-repo")));
-            console.log("Deployed test hub at:", address(impl));
-        }
+        console.log("Deployed Hub at:", address(dir));
 
         vm.stopBroadcast();
     }

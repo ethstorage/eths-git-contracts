@@ -49,9 +49,10 @@ contract EthsRepoTest is Test {
     bytes20 constant OID1 = bytes20(uint160(0x1111));
     bytes20 constant OID2 = bytes20(uint160(0x2222));
     bytes20 constant OID3 = bytes20(uint160(0x3333));
-    bytes20 constant PACK1 = bytes20(uint160(0xAAAA));
-    bytes20 constant PACK2 = bytes20(uint160(0xBBBB));
-    bytes20 constant PACK3 = bytes20(uint160(0xCCCC));
+    bytes constant PACK1 = hex"0000000000000000000000000000000000000AAA";
+    bytes constant PACK2 = hex"0000000000000000000000000000000000000BBB";
+    bytes constant PACK3 = hex"0000000000000000000000000000000000000CCC";
+    bytes constant EMPTY_BYTES = "";
 
     function setUp() public {
         factory = new MockFlatDirectoryFactory();
@@ -65,19 +66,15 @@ contract EthsRepoTest is Test {
         vm.stopPrank();
     }
 
-    function _uploadPack(bytes20 packKey, uint256 size) internal {
+    function _uploadPack(bytes memory packKey, uint256 size) internal {
         address fdAddr = repo.flatDirectory();
         MockFlatDirectory fd = MockFlatDirectory(payable(fdAddr));
         fd.upload(abi.encodePacked(packKey), size);
     }
 
-    function _push(
-        bytes calldata branch,
-        bytes20 parentOid,
-        bytes20 newOid,
-        bytes20 packKey,
-        uint256 packSize
-    ) internal {
+    function _push(bytes calldata branch, bytes20 parentOid, bytes20 newOid, bytes memory packKey, uint256 packSize)
+        internal
+    {
         _uploadPack(packKey, packSize);
         vm.startPrank(pusher);
         repo.push(branch, parentOid, newOid, packKey, packSize);
@@ -117,7 +114,7 @@ contract EthsRepoTest is Test {
 
         vm.startPrank(maintainer);
         vm.expectRevert("EthfsRepo: Cannot delete default branch");
-        repo.forcePush(BRANCH_MAIN, ZERO_OID, 0x0, 0, ZERO_OID, 0);
+        repo.forcePush(BRANCH_MAIN, ZERO_OID, EMPTY_BYTES, 0, ZERO_OID, 0);
         vm.stopPrank();
     }
 
@@ -139,7 +136,7 @@ contract EthsRepoTest is Test {
         assertTrue(existsBefore);
 
         vm.startPrank(maintainer);
-        repo.forcePush("dev", bytes20(0), bytes20(0), 0, bytes20(0), 0);
+        repo.forcePush("dev", bytes20(0), EMPTY_BYTES, 0, bytes20(0), 0);
         vm.stopPrank();
 
         (bytes20 headAfter, bool existsAfter) = repo.getBranchHead("dev");
